@@ -998,6 +998,7 @@ namespace dev.limitex.avatar.compressor.texture.editor
             float bitsPerPixel = GetBitsPerPixel(format);
             long bytes = 0;
             for (int index = 0; index < mipmapCount; ++index)
+                // Each mipmap level is 1/4 the size of previous: (width * height) / 4^index
                 bytes += (long) Mathf.RoundToInt(((width * height) >> 2 * index) * bitsPerPixel / 8f);
             return bytes;
         }
