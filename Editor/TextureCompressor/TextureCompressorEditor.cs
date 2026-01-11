@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using dev.limitex.avatar.compressor.editor;
 using dev.limitex.avatar.compressor.texture;
 using nadena.dev.ndmf.runtime;
@@ -30,6 +31,7 @@ namespace dev.limitex.avatar.compressor.texture.editor
         private SerializedProperty _processOtherTextures;
         private SerializedProperty _minSourceSize;
         private SerializedProperty _skipIfSmallerThan;
+        private SerializedProperty _excludedPaths;
         private SerializedProperty _targetPlatform;
         private SerializedProperty _useHighQualityFormatForHighComplexity;
         private SerializedProperty _enableLogging;
@@ -48,6 +50,9 @@ namespace dev.limitex.avatar.compressor.texture.editor
         private bool _showFrozenSection = true;
         private Vector2 _frozenScrollPosition;
 
+        // Excluded paths section state (collapsed by default)
+        private bool _showExcludedPathsSection = false;
+
         private static readonly Color HighQualityColor = new Color(0.1f, 0.9f, 0.6f);
         private static readonly Color QualityColor = new Color(0.2f, 0.8f, 0.4f);
         private static readonly Color BalancedColor = new Color(0.3f, 0.6f, 0.9f);
@@ -58,7 +63,7 @@ namespace dev.limitex.avatar.compressor.texture.editor
         private struct TexturePreviewData
         {
             public Texture2D Texture;
-            public string Path;
+            public string Guid;
             public float Complexity;
             public int RecommendedDivisor;
             public Vector2Int OriginalSize;
@@ -95,6 +100,7 @@ namespace dev.limitex.avatar.compressor.texture.editor
             _processOtherTextures = serializedObject.FindProperty("ProcessOtherTextures");
             _minSourceSize = serializedObject.FindProperty("MinSourceSize");
             _skipIfSmallerThan = serializedObject.FindProperty("SkipIfSmallerThan");
+            _excludedPaths = serializedObject.FindProperty("ExcludedPaths");
             _targetPlatform = serializedObject.FindProperty("TargetPlatform");
             _useHighQualityFormatForHighComplexity = serializedObject.FindProperty("UseHighQualityFormatForHighComplexity");
             _enableLogging = serializedObject.FindProperty("EnableLogging");
@@ -147,6 +153,19 @@ namespace dev.limitex.avatar.compressor.texture.editor
             EditorGUILayout.Space(10);
 
             EditorGUILayout.PropertyField(_enableLogging, new GUIContent("Enable Logging"));
+
+            EditorGUILayout.Space(10);
+
+            // Excluded paths section (collapsed by default for troubleshooting)
+            int excludedCount = compressor.ExcludedPaths.Count;
+            string excludedLabel = excludedCount > 0
+                ? $"Path Exclusions ({excludedCount})"
+                : "Path Exclusions";
+            _showExcludedPathsSection = EditorGUILayout.Foldout(_showExcludedPathsSection, excludedLabel, true);
+            if (_showExcludedPathsSection)
+            {
+                DrawExcludedPathsSection(compressor);
+            }
 
             EditorGUILayout.Space(15);
             DrawFrozenTexturesSection(compressor);
@@ -283,7 +302,14 @@ namespace dev.limitex.avatar.compressor.texture.editor
             EditorGUILayout.PropertyField(_maxDivisor, new GUIContent("Max Divisor"));
             EditorGUILayout.PropertyField(_maxResolution, new GUIContent("Max Resolution"));
             EditorGUILayout.PropertyField(_minResolution, new GUIContent("Min Resolution"));
-            EditorGUILayout.PropertyField(_forcePowerOfTwo, new GUIContent("Force Power of 2"));
+            EditorGUILayout.PropertyField(_forcePowerOfTwo, new GUIContent("Force Power of 2",
+                "When enabled, dimensions are rounded to nearest power of 2.\n" +
+                "When disabled, dimensions are rounded to nearest multiple of 4.\n" +
+                "Note: All output dimensions are always multiples of 4 for DXT/BC compression compatibility."));
+            EditorGUILayout.HelpBox(
+                "Output dimensions are always multiples of 4 for DXT/BC compression compatibility. " +
+                "Example: 150x150 becomes 152x152.",
+                MessageType.Info);
 
             EditorGUILayout.Space(10);
 
@@ -355,6 +381,102 @@ namespace dev.limitex.avatar.compressor.texture.editor
             EndBox();
         }
 
+        private void DrawExcludedPathsSection(TextureCompressor compressor)
+        {
+            BeginBox();
+
+            // Display existing paths
+            for (int i = compressor.ExcludedPaths.Count - 1; i >= 0; i--)
+            {
+                string currentPath = compressor.ExcludedPaths[i];
+
+                EditorGUILayout.BeginHorizontal();
+
+                EditorGUI.BeginChangeCheck();
+                string newPath = EditorGUILayout.TextField(currentPath);
+                if (EditorGUI.EndChangeCheck())
+                {
+                    Undo.RecordObject(compressor, "Edit Excluded Path");
+                    compressor.ExcludedPaths[i] = newPath;
+                    EditorUtility.SetDirty(compressor);
+                    currentPath = newPath;
+                }
+
+                if (GUILayout.Button("X", GUILayout.Width(25)))
+                {
+                    Undo.RecordObject(compressor, "Remove Excluded Path");
+                    compressor.ExcludedPaths.RemoveAt(i);
+                    EditorUtility.SetDirty(compressor);
+                    EditorGUILayout.EndHorizontal();
+                    continue;
+                }
+
+                EditorGUILayout.EndHorizontal();
+
+                // Show warning if path doesn't exist
+                if (!string.IsNullOrWhiteSpace(currentPath) && !IsValidAssetPath(currentPath))
+                {
+                    var savedColor = GUI.color;
+                    GUI.color = new Color(1f, 0.7f, 0.3f);
+                    EditorGUILayout.LabelField("  ⚠ Path not found", EditorStyles.miniLabel);
+                    GUI.color = savedColor;
+                }
+            }
+
+            // Add new path button with dropdown for presets
+            if (GUILayout.Button("+ Add Path..."))
+            {
+                ShowAddPathMenu(compressor);
+            }
+
+            if (compressor.ExcludedPaths.Count == 0)
+            {
+                EditorGUILayout.HelpBox("Textures with paths starting with listed prefixes will be skipped.", MessageType.None);
+            }
+
+            EndBox();
+        }
+
+        private void ShowAddPathMenu(TextureCompressor compressor)
+        {
+            var menu = new GenericMenu();
+
+            // Empty path option
+            menu.AddItem(new GUIContent("Empty"), false, () =>
+            {
+                Undo.RecordObject(compressor, "Add Excluded Path");
+                compressor.ExcludedPaths.Add("");
+                EditorUtility.SetDirty(compressor);
+            });
+
+            // Separator and presets
+            if (ExcludedPathPresets.Presets.Length > 0)
+            {
+                menu.AddSeparator("");
+
+                foreach (var preset in ExcludedPathPresets.Presets)
+                {
+                    bool alreadyAdded = compressor.ExcludedPaths.Contains(preset.Path);
+                    if (alreadyAdded)
+                    {
+                        menu.AddDisabledItem(new GUIContent($"{preset.Label} (added)"));
+                    }
+                    else
+                    {
+                        var presetCopy = preset;
+                        menu.AddItem(new GUIContent(preset.Label), false, () =>
+                        {
+                            Undo.RecordObject(compressor, $"Add {presetCopy.Label} Excluded Path");
+                            compressor.ExcludedPaths.Add(presetCopy.Path);
+                            EditorUtility.SetDirty(compressor);
+                        });
+                    }
+                }
+            }
+
+            menu.ShowAsContext();
+        }
+
         private void DrawFrozenTexturesSection(TextureCompressor compressor)
         {
             int frozenCount = compressor.FrozenTextures.Count;
@@ -368,6 +490,9 @@ namespace dev.limitex.avatar.compressor.texture.editor
                 DrawHelpBox("No frozen textures. Click 'Freeze' on textures in Preview to add manual overrides.", MessageType.Info);
                 return;
             }
+
+            // TODO: Remove this call after users have migrated from TexturePath to TextureGuid
+            DrawLegacyPathMigrationUI(compressor);
 
             // Only use ScrollView when there are many items (3+)
             bool useScrollView = frozenCount >= 3;
@@ -396,8 +521,11 @@ namespace dev.limitex.avatar.compressor.texture.editor
 
             EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
 
+            // Resolve path from GUID for display and loading
+            string assetPath = AssetDatabase.GUIDToAssetPath(frozen.TextureGuid);
+
             // Thumbnail
-            var texture = AssetDatabase.LoadAssetAtPath<Texture2D>(frozen.TexturePath);
+            var texture = !string.IsNullOrEmpty(assetPath) ? AssetDatabase.LoadAssetAtPath<Texture2D>(assetPath) : null;
             var preview = texture != null ? AssetPreview.GetAssetPreview(texture) : null;
             GUILayout.Label(preview ?? Texture2D.whiteTexture, GUILayout.Width(40), GUILayout.Height(40));
 
@@ -406,7 +534,7 @@ namespace dev.limitex.avatar.compressor.texture.editor
             // Header row with texture name and unfreeze button
             EditorGUILayout.BeginHorizontal();
 
-            string textureName = System.IO.Path.GetFileName(frozen.TexturePath);
+            string textureName = !string.IsNullOrEmpty(assetPath) ? System.IO.Path.GetFileName(assetPath) : frozen.TextureGuid;
             EditorGUILayout.LabelField(textureName, EditorStyles.boldLabel);
 
             if (GUILayout.Button("Unfreeze", GUILayout.Width(70)))
@@ -491,6 +619,47 @@ namespace dev.limitex.avatar.compressor.texture.editor
             }
         }
 
+        // TODO: Remove this method after users have migrated from TexturePath to TextureGuid
+        private void DrawLegacyPathMigrationUI(TextureCompressor compressor)
+        {
+            bool hasLegacyPaths = false;
+            foreach (var frozen in compressor.FrozenTextures)
+            {
+                if (!string.IsNullOrEmpty(frozen.TextureGuid) &&
+                    (frozen.TextureGuid.StartsWith("Assets/") || frozen.TextureGuid.StartsWith("Packages/")))
+                {
+                    hasLegacyPaths = true;
+                    break;
+                }
+            }
+
+            if (!hasLegacyPaths) return;
+
+            EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
+            EditorGUILayout.HelpBox("Legacy path-based entries detected. Convert to GUID for better stability.", MessageType.Warning);
+            if (GUILayout.Button("Convert to GUID", GUILayout.Width(120), GUILayout.Height(38)))
+            {
+                Undo.RecordObject(compressor, "Convert Frozen Textures to GUID");
+                int converted = 0;
+                foreach (var frozen in compressor.FrozenTextures)
+                {
+                    if (!string.IsNullOrEmpty(frozen.TextureGuid) &&
+                        (frozen.TextureGuid.StartsWith("Assets/") || frozen.TextureGuid.StartsWith("Packages/")))
+                    {
+                        string guid = AssetDatabase.AssetPathToGUID(frozen.TextureGuid);
+                        if (!string.IsNullOrEmpty(guid))
+                        {
+                            frozen.TextureGuid = guid;
+                            converted++;
+                        }
+                    }
+                }
+                EditorUtility.SetDirty(compressor);
+                Debug.Log($"[TextureCompressor] Converted {converted} frozen texture entries from path to GUID.");
+            }
+            EditorGUILayout.EndHorizontal();
+        }
+
         private void DrawPreviewSection(TextureCompressor compressor)
         {
             bool isOutdated = IsPreviewOutdated(compressor);
@@ -543,6 +712,11 @@ namespace dev.limitex.avatar.compressor.texture.editor
                 hash = hash * 31 + config.ProcessOtherTextures.GetHashCode();
                 hash = hash * 31 + config.MinSourceSize;
                 hash = hash * 31 + config.SkipIfSmallerThan;
+                hash = hash * 31 + config.ExcludedPaths.Count;
+                foreach (var path in config.ExcludedPaths)
+                {
+                    hash = hash * 31 + (path?.GetHashCode() ?? 0);
+                }
                 hash = hash * 31 + config.TargetPlatform.GetHashCode();
                 hash = hash * 31 + config.UseHighQualityFormatForHighComplexity.GetHashCode();
                 hash = hash * 31 + config.gameObject.GetInstanceID();
@@ -550,7 +724,7 @@ namespace dev.limitex.avatar.compressor.texture.editor
                 // Include frozen textures in hash
                 foreach (var frozen in config.FrozenTextures)
                 {
-                    hash = hash * 31 + (frozen.TexturePath?.GetHashCode() ?? 0);
+                    hash = hash * 31 + (frozen.TextureGuid?.GetHashCode() ?? 0);
                     hash = hash * 31 + frozen.Divisor;
                     hash = hash * 31 + frozen.Format.GetHashCode();
                     hash = hash * 31 + frozen.Skip.GetHashCode();
@@ -572,12 +746,12 @@ namespace dev.limitex.avatar.compressor.texture.editor
         {
             _previewSettingsHash = ComputeSettingsHash(config);
 
-            // Build frozen texture lookup
+            // Build frozen texture lookup (GUID -> Settings)
             var frozenLookup = new Dictionary<string, FrozenTextureSettings>();
             foreach (var frozen in config.FrozenTextures)
             {
-                if (!string.IsNullOrEmpty(frozen.TexturePath))
-                    frozenLookup[frozen.TexturePath] = frozen;
+                if (!string.IsNullOrEmpty(frozen.TextureGuid))
+                    frozenLookup[frozen.TextureGuid] = frozen;
             }
 
             var collector = new TextureCollector(
@@ -586,16 +760,14 @@ namespace dev.limitex.avatar.compressor.texture.editor
                 config.ProcessMainTextures,
                 config.ProcessNormalMaps,
                 config.ProcessEmissionMaps,
-                config.ProcessOtherTextures
+                config.ProcessOtherTextures,
+                config.ExcludedPaths
             );
 
             var processor = new TextureProcessor(
                 config.MinResolution,
                 config.MaxResolution,
-                config.ForcePowerOfTwo,
-                config.TargetPlatform,
-                config.UseHighQualityFormatForHighComplexity,
-                config.HighComplexityThreshold
+                config.ForcePowerOfTwo
             );
 
             var complexityCalc = new ComplexityCalculator(
@@ -612,6 +784,18 @@ namespace dev.limitex.avatar.compressor.texture.editor
             );
 
             var allTextures = collector.CollectAll(config.gameObject);
+
+            // Collect additional materials from animations and components using MaterialCollector
+            var additionalMaterialRefs = new List<MaterialReference>();
+            additionalMaterialRefs.AddRange(MaterialCollector.CollectFromAnimator(config.gameObject));
+            additionalMaterialRefs.AddRange(MaterialCollector.CollectFromComponents(config.gameObject));
+
+            var additionalMaterials = MaterialCollector.GetDistinctMaterials(additionalMaterialRefs);
+            if (additionalMaterials.Any())
+            {
+                // Use collectAll: true to include skipped textures in preview
+                collector.CollectFromMaterials(additionalMaterials, allTextures, collectAll: true);
+            }
 
             if (allTextures.Count == 0)
             {
@@ -650,9 +834,10 @@ namespace dev.limitex.avatar.compressor.texture.editor
                 var tex = kvp.Key;
                 var info = kvp.Value;
                 string assetPath = AssetDatabase.GetAssetPath(tex);
+                string guid = AssetDatabase.AssetPathToGUID(assetPath);
 
-                // Check if texture is frozen
-                frozenLookup.TryGetValue(assetPath, out var frozenSettings);
+                // Check if texture is frozen (using GUID for reliable lookup)
+                frozenLookup.TryGetValue(guid, out var frozenSettings);
                 bool isFrozen = frozenSettings != null;
 
                 if (info.IsProcessed && analysisResults.TryGetValue(tex, out var analysis))
@@ -680,6 +865,11 @@ namespace dev.limitex.avatar.compressor.texture.editor
                         {
                             targetFormat = TextureFormatSelector.ConvertFrozenFormat(frozenSettings.Format);
                         }
+                        else if (TextureFormatSelector.IsCompressedFormat(tex.format))
+                        {
+                            // Preserve original compressed format (matches CompressTexture behavior)
+                            targetFormat = tex.format;
+                        }
                         else
                         {
                             targetFormat = formatSelector.PredictFormat(isNormalMap, 0.5f, hasAlpha);
@@ -689,7 +879,16 @@ namespace dev.limitex.avatar.compressor.texture.editor
                     {
                         divisor = analysis.RecommendedDivisor;
                         recommendedSize = analysis.RecommendedResolution;
-                        targetFormat = formatSelector.PredictFormat(isNormalMap, analysis.NormalizedComplexity, hasAlpha);
+
+                        if (TextureFormatSelector.IsCompressedFormat(tex.format))
+                        {
+                            // Preserve original compressed format (matches CompressTexture behavior)
+                            targetFormat = tex.format;
+                        }
+                        else
+                        {
+                            targetFormat = formatSelector.PredictFormat(isNormalMap, analysis.NormalizedComplexity, hasAlpha);
+                        }
                     }
 
                     long estimatedMemory = CalculateCompressedMemory(
@@ -702,7 +901,7 @@ namespace dev.limitex.avatar.compressor.texture.editor
                     var previewData = new TexturePreviewData
                     {
                         Texture = tex,
-                        Path = assetPath,
+                        Guid = guid,
                         Complexity = analysis.NormalizedComplexity,
                         RecommendedDivisor = divisor,
                         OriginalSize = new Vector2Int(tex.width, tex.height),
@@ -719,7 +918,30 @@ namespace dev.limitex.avatar.compressor.texture.editor
                         FrozenSettings = frozenSettings
                     };
 
-                    if (isFrozen && !frozenSettings.Skip)
+                    if (isFrozen && frozenSettings.Skip)
+                    {
+                        // Frozen with Skip=true - add to skipped list
+                        skippedList.Add(new TexturePreviewData
+                        {
+                            Texture = tex,
+                            Guid = guid,
+                            Complexity = 0f,
+                            RecommendedDivisor = 1,
+                            OriginalSize = new Vector2Int(tex.width, tex.height),
+                            RecommendedSize = new Vector2Int(tex.width, tex.height),
+                            TextureType = info.TextureType,
+                            IsProcessed = false,
+                            SkipReason = SkipReason.FrozenSkip,
+                            OriginalMemory = originalMemory,
+                            EstimatedMemory = originalMemory,
+                            IsNormalMap = isNormalMap,
+                            PredictedFormat = null,
+                            HasAlpha = false,
+                            IsFrozen = true,
+                            FrozenSettings = frozenSettings
+                        });
+                    }
+                    else if (isFrozen)
                     {
                         frozenList.Add(previewData);
                     }
@@ -740,7 +962,7 @@ namespace dev.limitex.avatar.compressor.texture.editor
                     skippedList.Add(new TexturePreviewData
                     {
                         Texture = tex,
-                        Path = assetPath,
+                        Guid = guid,
                         Complexity = 0f,
                         RecommendedDivisor = 1,
                         OriginalSize = new Vector2Int(tex.width, tex.height),
@@ -763,11 +985,25 @@ namespace dev.limitex.avatar.compressor.texture.editor
             _frozenCount = frozenList.Count;
             _skippedCount = skippedList.Count;
 
-            // Combine and sort: processed first, then frozen, then skipped (each sorted by path)
+            // Combine and sort: processed first, then frozen, then skipped (each sorted by file path)
             var allPreviewData = new List<TexturePreviewData>(processedList.Count + frozenList.Count + skippedList.Count);
-            processedList.Sort((a, b) => string.Compare(a.Path, b.Path, System.StringComparison.Ordinal));
-            frozenList.Sort((a, b) => string.Compare(a.Path, b.Path, System.StringComparison.Ordinal));
-            skippedList.Sort((a, b) => string.Compare(a.Path, b.Path, System.StringComparison.Ordinal));
+
+            // Cache GUID to path conversions to avoid redundant API calls during sorting
+            var pathCache = new Dictionary<string, string>();
+            foreach (var data in processedList.Concat(frozenList).Concat(skippedList))
+            {
+                if (!string.IsNullOrEmpty(data.Guid) && !pathCache.ContainsKey(data.Guid))
+                    pathCache[data.Guid] = AssetDatabase.GUIDToAssetPath(data.Guid);
+            }
+            System.Comparison<TexturePreviewData> pathComparison = (a, b) =>
+                string.Compare(
+                    pathCache.TryGetValue(a.Guid, out var pathA) ? pathA : "",
+                    pathCache.TryGetValue(b.Guid, out var pathB) ? pathB : "",
+                    System.StringComparison.Ordinal);
+
+            processedList.Sort(pathComparison);
+            frozenList.Sort(pathComparison);
+            skippedList.Sort(pathComparison);
             allPreviewData.AddRange(processedList);
             allPreviewData.AddRange(frozenList);
             allPreviewData.AddRange(skippedList);
@@ -849,8 +1085,8 @@ namespace dev.limitex.avatar.compressor.texture.editor
                 }
 
                 bool isSkipped = !data.IsProcessed;
-                // Check if texture was frozen after preview was generated (real-time check)
-                bool isFrozenNow = !data.IsFrozen && compressor.IsFrozen(data.Path);
+                // Check if texture was frozen after preview was generated (real-time check using GUID)
+                bool isFrozenNow = !data.IsFrozen && compressor.IsFrozen(data.Guid);
                 if (isSkipped || isFrozenNow)
                 {
                     EditorGUI.BeginDisabledGroup(true);
@@ -878,7 +1114,7 @@ namespace dev.limitex.avatar.compressor.texture.editor
                         if (GUILayout.Button("Unfreeze", GUILayout.Width(70)))
                         {
                             Undo.RecordObject(compressor, "Unfreeze Texture");
-                            compressor.UnfreezeTexture(data.Path);
+                            compressor.UnfreezeTexture(data.Guid);
                             EditorUtility.SetDirty(compressor);
                         }
                         GUI.backgroundColor = savedColor;
@@ -889,8 +1125,8 @@ namespace dev.limitex.avatar.compressor.texture.editor
                         if (GUILayout.Button("Freeze", GUILayout.Width(70)))
                         {
                             Undo.RecordObject(compressor, "Freeze Texture");
-                            var frozenSettings = new FrozenTextureSettings(data.Path, data.RecommendedDivisor, FrozenTextureFormat.Auto, false);
-                            compressor.SetFrozenSettings(data.Path, frozenSettings);
+                            var frozenSettings = new FrozenTextureSettings(data.Guid, data.RecommendedDivisor, FrozenTextureFormat.Auto, false);
+                            compressor.SetFrozenSettings(data.Guid, frozenSettings);
                             EditorUtility.SetDirty(compressor);
                         }
                     }
@@ -964,6 +1200,8 @@ namespace dev.limitex.avatar.compressor.texture.editor
                         SkipReason.TooSmall => "Too small",
                         SkipReason.FilteredByType => "Filtered by type",
                         SkipReason.FrozenSkip => "User frozen (skipped)",
+                        SkipReason.RuntimeGenerated => "Runtime generated",
+                        SkipReason.ExcludedPath => "Excluded by path",
                         _ => "Skipped"
                     };
                     EditorGUILayout.LabelField(reasonText, EditorStyles.miniLabel);
@@ -1116,5 +1354,47 @@ namespace dev.limitex.avatar.compressor.texture.editor
                 _ => Color.white
             };
         }
+
+        /// <summary>
+        /// Checks if the given path prefix exists as a valid folder in the project.
+        /// </summary>
+        private static bool IsValidAssetPath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                return false;
+
+            // Remove trailing slash for folder check
+            string folderPath = path.TrimEnd('/', '\\');
+
+            // Check if it's a valid folder
+            if (AssetDatabase.IsValidFolder(folderPath))
+                return true;
+
+            // Check if parent folder exists (for partial paths like "Assets/Textures/")
+            int lastSlash = folderPath.LastIndexOfAny(new[] { '/', '\\' });
+            if (lastSlash > 0)
+            {
+                string parentPath = folderPath.Substring(0, lastSlash);
+                if (AssetDatabase.IsValidFolder(parentPath))
+                    return true;
+            }
+
+            // Check Packages folder specially (may not appear as regular folder)
+            if (path.StartsWith("Packages/"))
+            {
+                // Extract package name (e.g., "com.vrcfury.temp" from "Packages/com.vrcfury.temp/")
+                string[] parts = path.Split('/');
+                if (parts.Length >= 2)
+                {
+                    string packagePath = $"Packages/{parts[1]}";
+                    // Check if package.json exists in the package
+                    string packageJsonPath = $"{packagePath}/package.json";
+                    return System.IO.File.Exists(packageJsonPath);
+                }
+            }
+
+            return false;
+        }
+
     }
 }

@@ -3,8 +3,8 @@ using UnityEngine;
 namespace dev.limitex.avatar.compressor.texture
 {
     /// <summary>
-    /// Service for processing textures (resizing and compression).
-    /// Uses lock to ensure thread safety for RenderTexture operations.
+    /// Service for processing textures (resizing only).
+    /// All output dimensions are guaranteed to be multiples of 4 for DXT/BC compression compatibility.
     /// </summary>
     public class TextureProcessor
     {
@@ -14,21 +14,12 @@ namespace dev.limitex.avatar.compressor.texture
         private readonly int _minResolution;
         private readonly int _maxResolution;
         private readonly bool _forcePowerOfTwo;
-        private readonly TextureFormatSelector _formatSelector;
 
-        public TextureProcessor(int minResolution, int maxResolution, bool forcePowerOfTwo,
-            CompressionPlatform targetPlatform = CompressionPlatform.Auto,
-            bool useHighQualityFormatForHighComplexity = true,
-            float highQualityComplexityThreshold = 0.7f)
+        public TextureProcessor(int minResolution, int maxResolution, bool forcePowerOfTwo)
         {
             _minResolution = minResolution;
             _maxResolution = maxResolution;
             _forcePowerOfTwo = forcePowerOfTwo;
-            _formatSelector = new TextureFormatSelector(
-                targetPlatform,
-                useHighQualityFormatForHighComplexity,
-                highQualityComplexityThreshold
-            );
         }
 
         /// <summary>
@@ -36,45 +27,48 @@ namespace dev.limitex.avatar.compressor.texture
         /// </summary>
         /// <param name="source">Source texture to resize</param>
         /// <param name="analysis">Pre-computed analysis result with recommended settings</param>
-        /// <param name="enableLogging">Whether to log the operation</param>
-        /// <param name="isNormalMap">Whether this is a normal map texture</param>
-        /// <param name="formatOverride">Optional format override from frozen settings</param>
-        public Texture2D Resize(Texture2D source, TextureAnalysisResult analysis, bool enableLogging, bool isNormalMap = false, FrozenTextureFormat? formatOverride = null)
+        /// <returns>Resized texture (uncompressed RGBA32 format)</returns>
+        public Texture2D Resize(Texture2D source, TextureAnalysisResult analysis)
         {
             Texture2D result;
             if (analysis.RecommendedDivisor <= 1 &&
                 source.width <= _maxResolution &&
                 source.height <= _maxResolution)
             {
-                result = Copy(source);
+                // Even when copying, ensure dimensions are multiples of 4 for DXT/BC compression
+                int width = EnsureMultipleOf4(source.width);
+                int height = EnsureMultipleOf4(source.height);
+
+                if (width == source.width && height == source.height)
+                {
+                    result = Copy(source);
+                }
+                else
+                {
+                    result = ResizeTo(source, width, height);
+                }
             }
             else
             {
                 result = ResizeTo(source, analysis.RecommendedResolution.x, analysis.RecommendedResolution.y);
             }
 
-            // Apply compression to reduce memory usage
-            _formatSelector.CompressTexture(result, source.format, isNormalMap, analysis.NormalizedComplexity, formatOverride);
-
-            if (enableLogging)
-            {
-                var format = result.format;
-                var frozenInfo = formatOverride.HasValue && formatOverride.Value != FrozenTextureFormat.Auto
-                    ? " [FROZEN]"
-                    : "";
-                Debug.Log($"[TextureCompressor] {source.name}: " +
-                          $"{source.width}x{source.height} → " +
-                          $"{result.width}x{result.height} ({format}){frozenInfo} " +
-                          $"(Complexity: {analysis.NormalizedComplexity:P0}, " +
-                          $"Divisor: {analysis.RecommendedDivisor}x)");
-            }
-
             return result;
+        }
+
+        /// <summary>
+        /// Ensures a dimension is a multiple of 4 for DXT/BC compression compatibility.
+        /// </summary>
+        /// <returns>The dimension rounded up to the nearest multiple of 4, minimum 4 (e.g., 150→152, 4→4, 2→4)</returns>
+        private static int EnsureMultipleOf4(int dimension)
+        {
+            return Mathf.Max(4, ((dimension + 3) / 4) * 4);
         }
 
         /// <summary>
         /// Calculates new dimensions based on divisor.
         /// </summary>
+        /// <returns>New dimensions clamped to min/max resolution and rounded appropriately</returns>
         public Vector2Int CalculateNewDimensions(int width, int height, int divisor)
         {
             int newWidth = Mathf.Max(width / divisor, _minResolution);
@@ -92,6 +86,12 @@ namespace dev.limitex.avatar.compressor.texture
                     newWidth = Mathf.ClosestPowerOfTwo(_maxResolution / 2) * 2;
                 if (newHeight > _maxResolution)
                     newHeight = Mathf.ClosestPowerOfTwo(_maxResolution / 2) * 2;
+            }
+            else
+            {
+                // Ensure dimensions are multiples of 4 for DXT/BC compression compatibility
+                newWidth = EnsureMultipleOf4(newWidth);
+                newHeight = EnsureMultipleOf4(newHeight);
             }
 
             return new Vector2Int(newWidth, newHeight);
@@ -113,7 +113,6 @@ namespace dev.limitex.avatar.compressor.texture
                 Graphics.Blit(source, rt);
 
                 // Preserve mipmap setting from source texture
-                // Mipmaps are important for performance, visual quality, and VRAM optimization
                 Texture2D result = new Texture2D(newWidth, newHeight, TextureFormat.RGBA32, source.mipmapCount > 1);
                 result.ReadPixels(new Rect(0, 0, newWidth, newHeight), 0, 0);
                 result.Apply(source.mipmapCount > 1);

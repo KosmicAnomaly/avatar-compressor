@@ -5,6 +5,77 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Runtime-generated texture skipping** - Textures without asset paths are now automatically skipped
+  - Prevents corruption of data textures dynamically created during build
+  - These textures may use RGB values for non-visual data (depth, deformation vectors)
+  - New `SkipReason.RuntimeGenerated` enum value for UI display
+- **Path-based texture exclusion** - Exclude textures by asset path prefix
+  - `ExcludedPaths` list in TextureCompressor component for user-defined exclusions
+  - Textures with paths starting with listed prefixes are skipped from compression
+  - Built-in presets for common packages (e.g., VRCFury Temp)
+  - Collapsible "Path Exclusions" section in Editor UI with preset buttons
+  - New `SkipReason.ExcludedPath` enum value for UI display
+- **Animation-referenced material support** - Materials referenced by animations are now included in compression
+  - Uses NDMF's `AnimatorServicesContext` to detect materials in animation clips (MaterialSwap, etc.)
+  - MaterialCloner can now clone additional materials beyond renderer-attached ones
+  - TextureCollector collects textures from animation-referenced materials
+  - Animation curves are automatically updated to reference compressed textures
+- **Component-referenced material support** - Materials referenced by components (MA MaterialSetter, etc.) are now detected
+  - Scans all components' serialized properties for Material references
+  - Respects `EditorOnly` tag (excluded from collection as they are stripped from build)
+- **Non-NDMF usage warning** - Added runtime warning when `ICompressor.Compress()` is called outside NDMF build context
+  - Warns users that Renderer material references will be changed (though original .mat files are NOT modified)
+  - Recommends using the NDMF plugin for non-destructive workflow
+
+### Changed
+
+- **Frozen texture identification** - Changed from asset path to GUID-based identification (**Breaking**)
+  - `FrozenTextureSettings.TexturePath` renamed to `TextureGuid`
+  - `TextureCompressor` API methods now accept GUID instead of asset path:
+    - `IsFrozen(string guid)`
+    - `GetFrozenSettings(string guid)`
+    - `SetFrozenSettings(string guid, FrozenTextureSettings settings)`
+    - `UnfreezeTexture(string guid)`
+  - Prevents broken references when texture files are moved or renamed
+  - Legacy path-based settings are automatically migrated via `[FormerlySerializedAs]`
+  - Migration UI in Inspector to convert legacy path entries to GUID
+- **TextureProcessor responsibility simplified** - Now handles resizing only, compression moved to TextureFormatSelector
+  - Clearer separation of concerns between resizing and compression
+  - TextureCompressorService now coordinates both operations
+- **TextureCompressorPass refactored** - Extracted pass logic into dedicated class
+  - Better separation of concerns between plugin registration and execution
+  - Improved error handling with try-catch and warning messages
+- **MaterialCloner moved** - Relocated from `Common/Services` to `TextureCompressor/Core/Services`
+  - Now part of the TextureCompressor module for better cohesion
+  - Enhanced to support cloning additional materials beyond renderer-attached ones
+- **Streaming mipmaps warning** - Now only displays once per build instead of per texture
+- **Unit tests expanded** - Added comprehensive tests for new features
+  - MaterialCollector tests (animation/component material detection, EditorOnly filtering)
+  - MaterialReference tests (equality, cloning, source tracking)
+  - ComponentUtils tests (IsEditorOnly hierarchy traversal)
+  - TextureCollector tests (EditorOnly tagged object skipping, RuntimeGenerated skip, ExcludedPath skip)
+  - TextureProcessor tests for resize functionality and settings preservation
+
+### Fixed
+
+- **Normal map alpha channel preservation** - Normal maps with alpha now use BC7 instead of BC5
+  - BC5 format only stores 2 channels (RG), losing alpha data
+  - Ensures alpha information is preserved for special normal map workflows
+- **Preview format consistency** - Preview now correctly shows preserved format for already-compressed textures
+  - Matches the actual compression behavior where original compressed formats are maintained
+  - Prevents misleading format predictions in the preview UI
+- **DXT/BC texture dimension compatibility** - `EnsureMultipleOf4` now rounds up instead of down
+  - Ensures textures meet the 4x4 block size requirement for DXT/BC compression formats
+  - Prevents potential texture corruption from undersized dimensions
+- **Frozen texture skip handling** - Skipped frozen textures now display correctly in preview
+- **Modular Avatar compatibility** - Added `AfterPlugin("nadena.dev.modular-avatar")` to ensure proper execution order
+  - Fixes potential issues with materials added/modified by Modular Avatar not being processed correctly
+  - Ensures animation-referenced materials from MA are properly detected and compressed
+
 ## [v0.3.4] - 2026-01-06
 
 ### Fixed

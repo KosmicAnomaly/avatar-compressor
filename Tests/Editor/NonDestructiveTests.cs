@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using NUnit.Framework;
+using UnityEditor;
 using UnityEngine;
 using dev.limitex.avatar.compressor.common;
 using dev.limitex.avatar.compressor.texture;
@@ -15,9 +16,11 @@ namespace dev.limitex.avatar.compressor.tests
     {
         private const string CloneSuffix = "_clone";
         private const string CompressedSuffix = "_compressed";
+        private const string TestAssetFolder = "Assets/_LAC_TMP";
 
         private List<Object> _createdObjects;
         private List<GameObject> _rootObjects;
+        private List<string> _createdAssetPaths;
         private Shader _standardShader;
 
         [SetUp]
@@ -25,8 +28,15 @@ namespace dev.limitex.avatar.compressor.tests
         {
             _createdObjects = new List<Object>();
             _rootObjects = new List<GameObject>();
+            _createdAssetPaths = new List<string>();
             _standardShader = Shader.Find("Standard");
             Assert.IsNotNull(_standardShader, "Standard shader not found. Tests require Unity Editor environment.");
+
+            // Ensure test folder exists
+            if (!AssetDatabase.IsValidFolder(TestAssetFolder))
+            {
+                AssetDatabase.CreateFolder("Assets", "_LAC_TMP");
+            }
         }
 
         [TearDown]
@@ -49,6 +59,26 @@ namespace dev.limitex.avatar.compressor.tests
             }
             _createdObjects.Clear();
             _rootObjects.Clear();
+
+            // Delete created asset files
+            foreach (var path in _createdAssetPaths)
+            {
+                if (!string.IsNullOrEmpty(path) && AssetDatabase.LoadAssetAtPath<Object>(path) != null)
+                {
+                    AssetDatabase.DeleteAsset(path);
+                }
+            }
+            _createdAssetPaths.Clear();
+
+            // Clean up test folder if empty
+            if (AssetDatabase.IsValidFolder(TestAssetFolder))
+            {
+                var remaining = AssetDatabase.FindAssets("", new[] { TestAssetFolder });
+                if (remaining.Length == 0)
+                {
+                    AssetDatabase.DeleteAsset(TestAssetFolder);
+                }
+            }
         }
 
         private void CleanupCompressedAssets(GameObject root)
@@ -78,10 +108,16 @@ namespace dev.limitex.avatar.compressor.tests
                     continue;
 
                 var tex = mat.GetTexture(shader.GetPropertyName(i));
-                if (tex != null && !_createdObjects.Contains(tex))
-                {
-                    Object.DestroyImmediate(tex);
-                }
+                if (tex == null) continue;
+
+                // Skip if it's an asset (has asset path) - only destroy runtime-created textures
+                string assetPath = AssetDatabase.GetAssetPath(tex);
+                if (!string.IsNullOrEmpty(assetPath)) continue;
+
+                // Skip if it's in our created objects list
+                if (_createdObjects.Contains(tex)) continue;
+
+                Object.DestroyImmediate(tex);
             }
         }
 
@@ -569,10 +605,10 @@ namespace dev.limitex.avatar.compressor.tests
         public void Compress_WithFrozenSettingsInConfig_NonDestructiveBehaviorMaintained()
         {
             var config = CreateConfig();
-            // Add frozen settings to config (won't match runtime textures due to no asset path)
+            // Add frozen settings to config (won't match runtime textures due to no asset GUID)
             config.FrozenTextures.Add(new FrozenTextureSettings
             {
-                TexturePath = "Assets/NonExistent/Texture.png",
+                TextureGuid = "00000000000000000000000000000001",
                 Divisor = 2,
                 Format = FrozenTextureFormat.DXT5,
                 Skip = false
@@ -605,10 +641,10 @@ namespace dev.limitex.avatar.compressor.tests
         public void Compress_WithFrozenSkipSettingsInConfig_MaterialStillCloned()
         {
             var config = CreateConfig();
-            // Add frozen skip settings
+            // Add frozen skip settings (dummy GUID that won't match any real texture)
             config.FrozenTextures.Add(new FrozenTextureSettings
             {
-                TexturePath = "Assets/NonExistent/SkippedTexture.png",
+                TextureGuid = "00000000000000000000000000000002",
                 Skip = true
             });
             var service = new TextureCompressorService(config);
@@ -1013,8 +1049,15 @@ namespace dev.limitex.avatar.compressor.tests
 
             texture.SetPixels(pixels);
             texture.Apply();
-            _createdObjects.Add(texture);
-            return texture;
+
+            // Save as asset to get a valid asset path
+            string assetPath = $"{TestAssetFolder}/TestTexture_{width}x{height}_{System.Guid.NewGuid():N}.asset";
+            AssetDatabase.CreateAsset(texture, assetPath);
+            _createdAssetPaths.Add(assetPath);
+
+            // Reload from asset to ensure it has a valid asset path
+            var loadedTexture = AssetDatabase.LoadAssetAtPath<Texture2D>(assetPath);
+            return loadedTexture;
         }
 
         /// <summary>
